@@ -1,0 +1,11 @@
+{
+  "name": "plan-do-see-task7",
+  "version": "1.0.0",
+  "description": "Plan-Do-See Diary Task 7 with Authentication",
+  "main": "api/index.js",
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2"
+  }
+}
