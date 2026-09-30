@@ -1,21 +1,23 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 app.use(express.json());
 
-// 환경 변수 비밀키 (없을 시 기본값 사용)
-const JWT_SECRET = process.env.JWT_SECRET || 'super-secret-pds-task7-key';
+// Supabase DB 클라이언트 설정
+const SUPABASE_URL = process.env.SUPABASE_URL || 'YOUR_SUPABASE_URL_HERE';
+const SUPABASE_KEY = process.env.SUPABASE_ANON_KEY || 'YOUR_SUPABASE_ANON_KEY_HERE';
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// 메모리 DB (서버 내 유저 및 할 일 보관)
-const users = []; // { id, email, password }
-const todos = []; // { id, userId, title, dueDate, priority, tag, estTime, completed }
+// JWT 비밀키
+const JWT_SECRET = process.env.JWT_SECRET || 'super-secret-pds-task7-key';
 
 // [미들웨어] 토큰 검증 및 인가 (401 / 403 처리)
 function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+  const token = authHeader && authHeader.split(' ')[1];
 
   if (!token) {
     return res.status(401).json({ error: '로그인이 필요합니다.' });
@@ -25,12 +27,12 @@ function authenticateToken(req, res, next) {
     if (err) {
       return res.status(403).json({ error: '유효하지 않거나 만료된 토큰입니다.' });
     }
-    req.user = user; // { userId, email }
+    req.user = user;
     next();
   });
 }
 
-// 1. 회원가입 (bcrypt 비밀번호 암호화 보관)
+// 1. 회원가입 (Supabase DB 저구)
 app.post('/api/auth/signup', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -38,29 +40,47 @@ app.post('/api/auth/signup', async (req, res) => {
       return res.status(400).json({ error: '이메일과 비밀번호를 모두 입력해 주세요.' });
     }
 
-    const existingUser = users.find(u => u.email === email);
+    // 중복 아이디 DB 확인
+    const { data: existingUser } = await supabase
+      .from('users')
+      .select('email')
+      .eq('email', email)
+      .single();
+
     if (existingUser) {
       return res.status(400).json({ error: '이미 존재하는 계정입니다.' });
     }
 
-    // bcrypt 해싱 (Salt Round: 12)
+    // 비밀번호 해싱 후 DB 저장
     const hashedPassword = await bcrypt.hash(password, 12);
-    const newUser = { id: `user_${Date.now()}`, email, password: hashedPassword };
-    users.push(newUser);
+    const userId = `user_${Date.now()}`;
 
-    return res.status(201).json({ message: '회원가입 완료', userId: newUser.id });
+    const { error } = await supabase
+      .from('users')
+      .insert([{ id: userId, email, password: hashedPassword }]);
+
+    if (error) {
+      return res.status(500).json({ error: 'DB 저장 실패: ' + error.message });
+    }
+
+    return res.status(201).json({ message: '회원가입 완료', userId });
   } catch (err) {
     return res.status(500).json({ error: '회원가입 처리 중 서버 오류가 발생했습니다.' });
   }
 });
 
-// 2. 로그인 (JWT 토큰 발급 및 만료 설정)
+// 2. 로그인 (Supabase DB 조회 및 JWT 발급)
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
-    const user = users.find(u => u.email === email);
 
-    if (!user) {
+    const { data: user, error } = await supabase
+      .from('users')
+      .select('*')
+      .eq('email', email)
+      .single();
+
+    if (error || !user) {
       return res.status(401).json({ error: '이메일 또는 비밀번호가 일치하지 않습니다.' });
     }
 
@@ -69,11 +89,11 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(401).json({ error: '이메일 또는 비밀번호가 일치하지 않습니다.' });
     }
 
-    // JWT 토큰 발급 (유효기간: 1시간)
+    // JWT 토큰 발급
     const token = jwt.sign(
       { userId: user.id, email: user.email },
       JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '7d' }
     );
 
     return res.json({
@@ -86,44 +106,82 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
-// 3. 내 자료 목록 조회 (타인 데이터 철저 격리)
-app.get('/api/todos', authenticateToken, (req, res) => {
-  const myTodos = todos.filter(t => t.userId === req.user.userId);
-  return res.json(myTodos);
+// 3. 내 자료 목록 조회 (DB에서 해당 유저 데이터만 가져오기)
+app.get('/api/todos', authenticateToken, async (req, res) => {
+  try {
+    const { data: myTodos, error } = await supabase
+      .from('todos')
+      .select('*')
+      .eq('user_id', req.user.userId)
+      .order('id', { ascending: false });
+
+    if (error) {
+      return res.status(500).json({ error: '데이터 조회 실패: ' + error.message });
+    }
+
+    // 프론트엔드 키 이름 호환 변환 (user_id -> userId, due_date -> dueDate)
+    const formattedTodos = (myTodos || []).map(t => ({
+      id: t.id,
+      userId: t.user_id,
+      title: t.title,
+      dueDate: t.due_date,
+      priority: t.priority,
+      tag: t.tag,
+      estTime: t.est_time,
+      completed: t.completed
+    }));
+
+    return res.json(formattedTodos);
+  } catch (err) {
+    return res.status(500).json({ error: '서버 오류' });
+  }
 });
 
-// 4. 내 자료 작성
-app.post('/api/todos', authenticateToken, (req, res) => {
-  const newTodo = {
-    id: Date.now(),
-    userId: req.user.userId,
-    title: req.body.title,
-    dueDate: req.body.dueDate || '2026-11-01',
-    priority: req.body.priority || '보통',
-    tag: req.body.tag || '기본',
-    estTime: Number(req.body.estTime) || 60,
-    completed: false
-  };
-  todos.push(newTodo);
-  return res.status(201).json(newTodo);
+// 4. 내 자료 작성 (DB Insert)
+app.post('/api/todos', authenticateToken, async (req, res) => {
+  try {
+    const newTodo = {
+      id: Date.now(),
+      user_id: req.user.userId,
+      title: req.body.title,
+      due_date: req.body.dueDate || new Date().toISOString().split('T')[0],
+      priority: req.body.priority || '보통',
+      tag: req.body.tag || '기본',
+      est_time: Number(req.body.estTime) || 60,
+      completed: false
+    };
+
+    const { error } = await supabase.from('todos').insert([newTodo]);
+
+    if (error) {
+      return res.status(500).json({ error: 'DB 저장 실패: ' + error.message });
+    }
+
+    return res.status(201).json(newTodo);
+  } catch (err) {
+    return res.status(500).json({ error: '서버 오류' });
+  }
 });
 
-// 5. 내 자료 삭제 (타인 자료 접근 시 403 차단)
-app.delete('/api/todos/:id', authenticateToken, (req, res) => {
-  const todoId = Number(req.params.id);
-  const index = todos.findIndex(t => t.id === todoId);
+// 5. 내 자료 삭제 (DB Delete)
+app.delete('/api/todos/:id', authenticateToken, async (req, res) => {
+  try {
+    const todoId = Number(req.params.id);
 
-  if (index === -1) {
-    return res.status(404).json({ error: '자료를 찾을 수 없습니다.' });
+    const { error } = await supabase
+      .from('todos')
+      .delete()
+      .eq('id', todoId)
+      .eq('user_id', req.user.userId);
+
+    if (error) {
+      return res.status(500).json({ error: '삭제 실패: ' + error.message });
+    }
+
+    return res.json({ message: '삭제 완료' });
+  } catch (err) {
+    return res.status(500).json({ error: '서버 오류' });
   }
-
-  // 타 유저 자료 변경 시도 검증
-  if (todos[index].userId !== req.user.userId) {
-    return res.status(403).json({ error: '타인의 자료는 삭제할 수 없습니다.' });
-  }
-
-  todos.splice(index, 1);
-  return res.json({ message: '삭제 완료' });
 });
 
 module.exports = app;

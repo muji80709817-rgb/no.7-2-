@@ -311,7 +311,6 @@
         });
 
         if (res.status === 401 || res.status === 403) {
-          alert('세션이 유효하지 않거나 만료되었습니다 (401/403). 로그인 페이지로 이동합니다.');
           handleLogout();
           return;
         }
@@ -351,7 +350,7 @@
       const token = localStorage.getItem('token');
       const todoData = {
         title,
-        dueDate: document.getElementById('todoDueDate').value || '2026-11-01',
+        dueDate: document.getElementById('todoDueDate').value || new Date().toISOString().split('T')[0],
         priority: document.getElementById('todoPriority').value,
         tag: document.getElementById('todoTag').value || '기본',
         estTime: Number(document.getElementById('todoEstTime').value) || 60
@@ -374,7 +373,7 @@
 
     function renderTodos() {
       const keyword = document.getElementById('searchKeyword').value.toLowerCase();
-      let filtered = (todosData || []).filter(t => t.title.toLowerCase().includes(keyword));
+      let filtered = (todosData || []).filter(t => t.title && t.title.toLowerCase().includes(keyword));
 
       const list = document.getElementById('todoList');
       if (filtered.length === 0) {
